@@ -1,0 +1,8 @@
+build
+components
+managed_components
+
+.cache
+.dist
+.devcontainer
+.vscode
