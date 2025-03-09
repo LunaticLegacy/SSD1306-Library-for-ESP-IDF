@@ -11,9 +11,9 @@
 
 
 ## 使用例：
-请先在使用之前，#include "ssd1306_luna/ssd1306_luna.h"
-然后在实例化后使用。
-个人的代码习惯是不适用app_main作为主函数，而是另定义一个main函数作为主函数。
+请先在使用之前，#include "ssd1306_luna/ssd1306_luna.h" <br>
+然后在实例化后使用。<br>
+个人的代码习惯是不适用app_main作为主函数，而是另定义一个main函数作为主函数。<br>
 
 ```
 // C++  main.cpp
@@ -47,8 +47,9 @@ extern "C" void app_main(void) {
 
 ## 注意：
 (2025/3/9) 
-ESP-IDF目前版本的新版驱动里，异步I2C驱动很有问题。所以目前仅限同步驱动。
+ESP-IDF目前版本的新版驱动里，异步I2C驱动很有问题。所以目前仅限同步驱动。<br>
 （等什么时候这玩意修好了我再做异步）
 
 ## 作者：
 月と猫 - LunaNeko
+CC-BY-SA
