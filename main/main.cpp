@@ -8,38 +8,45 @@
 #include "esp_task_wdt.h"
 
 
-#include "st7789/st7789_basic.hpp"
+#include "st7789_luna/st7789_basic.hpp"
 
 // 喂狗函数，用于看门狗。
 #define feed esp_task_wdt_reset
 
-#define ST7789_WIDTH        240
-#define ST7789_HEIGHT       240
-#define PIN_ST7789_DIN      23
-#define PIN_ST7789_CLK      18
-#define PIN_ST7789_CS       5
-#define PIN_ST7789_DC       4
-#define PIN_ST7789_RST      16
-#define PIN_ST7789_BL       17
+// --------- ST7789初始化 ---------
+// 宏定义
+#define ST7789_WIDTH            240
+#define ST7789_HEIGHT           240
+#define PIN_ST7789_DIN          23
+#define PIN_ST7789_CLK          18
+#define PIN_ST7789_CS           5
+#define PIN_ST7789_DC           4
+#define PIN_ST7789_RST          16
+#define PIN_ST7789_BL           17
+#define ST7789_CLOCK_SPEED_MHZ  5
 
-Luna::ST7789_Basic *screen = new Luna::ST7789_Basic(
-    ST7789_WIDTH, ST7789_HEIGHT, 
-    PIN_ST7789_DIN, PIN_ST7789_CLK, PIN_ST7789_CS, 
-    PIN_ST7789_DC, PIN_ST7789_RST, PIN_ST7789_BL
-);
-
-//  内存监视函数
-static std::vector<uint32_t> memory_monitor_task() {
-    // 获取当前空闲堆内存
-    uint32_t free_memory = esp_get_free_heap_size();
-    // 获取最小空闲堆内存
-    uint32_t min_free_memory = esp_get_minimum_free_heap_size();
-    return {free_memory, min_free_memory};
-}
+// 全局实例，在栈上分配的全局实例
+Luna::ST7789_Basic screen(Luna::ST7789_Config{
+    .width = (int16_t)ST7789_WIDTH, 
+    .height = (int16_t)ST7789_HEIGHT, 
+    .din = (int16_t)PIN_ST7789_DIN, 
+    .clk = (int16_t)PIN_ST7789_CLK, 
+    .cs = (int16_t)PIN_ST7789_CS, 
+    .dc = (int16_t)PIN_ST7789_DC, 
+    .rst = (int16_t)PIN_ST7789_RST, 
+    .bl = (int16_t)PIN_ST7789_BL, 
+    .spi_clock_hz = ST7789_CLOCK_SPEED_MHZ * 1000000
+});
 
 int main() {
     printf("| Entered main().\n");
+    // 初始化屏幕信息。
+    screen.begin();
 
+    screen.fillScreen(0x0000);      // 清屏
+    screen.drawRectangle(0,   0, 40, 40, 0xF800); // 红
+    screen.drawRectangle(100, 100, 40, 40, 0x07E0); // 绿
+    screen.drawRectangle(200, 200, 40, 40, 0x001F); // 蓝
 
     return 0;
 }
