@@ -1,6 +1,9 @@
 #include <cstdint>
-#include <stdio.h>
+#include <cstdio>
+#include <cstdarg>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 
 #include "soc/gpio_periph.h"
 #include "driver/spi_master.h"
@@ -11,10 +14,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
-#include "esp_mac.h"
 #include "esp_system.h"
 // 添加ets_delay_us函数的头文件
 #include "esp_rom_sys.h"
+// heap_caps for DMA-capable free
+#include "esp_heap_caps.h"
 
 // 头文件用的。
 #include "./st7789_basic.hpp"
@@ -28,17 +32,16 @@ namespace Luna
 {
 
 // 开机初始化指令。
-// 傻逼waveshare，你的屏幕把我坑进去6个小时。
 static constexpr uint8_t init_cmds[] = {
     SWRESET,                // 软件复位
     SLPOUT,                 // 退出睡眠模式
     // 添加更多初始化命令
-    COLMOD,     0x55,       // 设置色彩格式为16位RGB565（使用常见 0x55）
-    MADCTL,     0x08,       // MADCTL设置为BGR
+    COLMOD,     0x05,       // 设置色彩格式为16位RGB565（使用常见 0x55）
+    MADCTL,     0x20,       // MADCTL设置为BGR，反转上下。
     PORCH_CTRL, 0x08, 0x08, 0x08, 0x33, 0x33, // 前后廊设置
     GATE_CTRL,  0x11,       // 门控设置
     VCOMS_CTRL, 0x35,       // VCOM设置
-    INVON,                  // 反色
+                      // 反色
     DISPON,                 // 开启显示
 };
 
@@ -53,36 +56,58 @@ ST7789_Basic::ST7789_Basic(const ST7789_Config& config)
         _rst(config.rst), _bl(config.bl), _clockSpeed(config.spi_clock_hz),
         _totalpx(config.width * config.height) {
     _spi = nullptr;
-    printf("| Hello, ST7789!\n");
+    std::printf("| Hello, ST7789!\n");
 
     // 分配数组。
     this->front_buffer = (uint16_t*)heap_caps_malloc(this->_totalpx * sizeof(uint16_t), MALLOC_CAP_DMA);
-    this->signal = xSemaphoreCreateBinary();
-    
-    // 检查内存分配是否成功
-    if (this->front_buffer == nullptr || this->signal == nullptr) {
-        printf("ERROR: Failed to allocate memory for screen buffers or semaphore\n");
-        // 如果分配失败，释放已分配的资源
-        if (this->front_buffer) {
-            heap_caps_free(this->front_buffer);
-            this->front_buffer = nullptr;
-        }
-        if (this->signal) {
-            vSemaphoreDelete(this->signal);
-            this->signal = nullptr;
-        }
+
+    if (this->front_buffer == nullptr) {
+        std::printf("ERROR: Failed to allocate memory for screen buffer.\n");
+        heap_caps_free(this->front_buffer);
         return;
     }
 
-    printf("| Memory allocated.\n");
+    // 页临时缓冲区。
+    this->temp_page_buffer = (uint16_t*)heap_caps_malloc(this->_totalpx * sizeof(uint16_t) / 64, MALLOC_CAP_DMA);
+    if (this->temp_page_buffer == nullptr) {
+        std::printf("ERROR: Failed to allocate memory for temporal page buffer.\n");
+        heap_caps_free(this->temp_page_buffer);
+        return;
+    }
+
+    // 为脏页分配空间。
+    this->dirty_map = new uint8_t[8];
+    if (this->dirty_map == nullptr) {
+        std::printf("ERROR: Failed to allocate bitmap for dirty page.\n");
+        delete[] this->dirty_map;
+        return;
+    }
+    memset(this->dirty_map, 0, 8);
+    
+    // 分配5个事务，并将其压入队列中。
+    for (uint16_t i = 0; i < this->transaction_num; i++) {
+        spi_transaction_t* t = new spi_transaction_t({});
+        // 分配失败的场合，立即释放已分配的资源。
+        if (t == nullptr) {
+            std::printf("ERROR: Failed to allocate memory for transaction deques\n");
+            for (auto& p : this->transaction_deque) {
+                delete p;
+                p = nullptr;
+            }
+            return;
+        }
+        transaction_deque.push_back(t);
+    }
+
+    std::printf("| Memory allocated.\n");
     // 初始化为全黑。用memset也不影响，对吧 ;)
-    memset(this->front_buffer, 0, this->_totalpx * sizeof(uint16_t));
+    std::memset(this->front_buffer, 0, this->_totalpx * sizeof(uint16_t));
 
     this->initSPI();
     
     // 检查SPI初始化是否成功
     if (this->_spi == nullptr) {
-        printf("ERROR: SPI initialization failed\n");
+        std::printf("ERROR: SPI initialization failed\n");
         return;
     }
 }
@@ -90,11 +115,11 @@ ST7789_Basic::ST7789_Basic(const ST7789_Config& config)
 // 初始化函数
 esp_err_t ST7789_Basic::begin() {
     // 配置引脚 
-    printf("Initializing ST7789...\n");
+    std::printf("Initializing ST7789...\n");
 
     // 检查SPI是否已初始化
     if (this->_spi == nullptr) {
-        printf("ERROR: SPI device not initialized. Call initSPI() first.\n");
+        std::printf("ERROR: SPI device not initialized. Call initSPI() first.\n");
         return ESP_FAIL;
     }
 
@@ -102,27 +127,27 @@ esp_err_t ST7789_Basic::begin() {
     esp_err_t ret;
     ret = gpio_set_direction((gpio_num_t)this->_rst, GPIO_MODE_OUTPUT);
     if (ret != ESP_OK) {
-        printf("Failed to set RST pin direction: %d\n", ret);
+        std::printf("Failed to set RST pin direction: %d\n", ret);
         return ret;
     }
     
     ret = gpio_set_direction((gpio_num_t)this->_dc, GPIO_MODE_OUTPUT);
     if (ret != ESP_OK) {
-        printf("Failed to set DC pin direction: %d\n", ret);
+        std::printf("Failed to set DC pin direction: %d\n", ret);
         return ret;
     }
     
     ret = gpio_set_direction((gpio_num_t)this->_bl, GPIO_MODE_OUTPUT);
     if (ret != ESP_OK) {
-        printf("Failed to set BL pin direction: %d\n", ret);
+        std::printf("Failed to set BL pin direction: %d\n", ret);
         return ret;
     }
 
     // 拉高硬件复位，复位屏幕。
-    printf("Resetting screen...\n");
+    std::printf("Resetting screen...\n");
     ret = gpio_set_level((gpio_num_t)this->_rst, 1);
     if (ret != ESP_OK) {
-        printf("Failed to set RST pin level high: %d\n", ret);
+        std::printf("Failed to set RST pin level high: %d\n", ret);
         return ret;
     }
     
@@ -130,7 +155,7 @@ esp_err_t ST7789_Basic::begin() {
     
     ret = gpio_set_level((gpio_num_t)this->_rst, 0);
     if (ret != ESP_OK) {
-        printf("Failed to set RST pin level low: %d\n", ret);
+        std::printf("Failed to set RST pin level low: %d\n", ret);
         return ret;
     }
     
@@ -138,14 +163,14 @@ esp_err_t ST7789_Basic::begin() {
     
     ret = gpio_set_level((gpio_num_t)this->_rst, 1);
     if (ret != ESP_OK) {
-        printf("Failed to set RST pin level high: %d\n", ret);
+        std::printf("Failed to set RST pin level high: %d\n", ret);
         return ret;
     }
     
     vTaskDelay(pdMS_TO_TICKS(250));
 
 
-    printf("Executing init commands...\n");
+    std::printf("Executing init commands...\n");
     // 初始化指令
     size_t i = 0;
     while (i < sizeof(init_cmds)) {
@@ -185,13 +210,14 @@ esp_err_t ST7789_Basic::begin() {
             vTaskDelay(pdMS_TO_TICKS(50));
         }
     }
+
     vTaskDelay(pdMS_TO_TICKS(50));
-    printf(" | Initialization command running successfully.\n");
+    std::printf(" | Initialization commandset running successfully.\n");
 
     // 打开背光
     ret = gpio_set_level((gpio_num_t)this->_bl, 1);
     if (ret != ESP_OK) {
-        printf("Failed to set BL pin level: %d\n", ret);
+        std::printf("Failed to set BL pin level: %d\n", ret);
         return ret;
     }
 
@@ -199,7 +225,7 @@ esp_err_t ST7789_Basic::begin() {
     this->fillScreen(0x0000);
     this->flush();
 
-    printf("Initialization complete.\n");
+    std::printf("Initialization complete.\n");
 
     return ESP_OK;
 }
@@ -208,13 +234,18 @@ esp_err_t ST7789_Basic::begin() {
 void ST7789_Basic::drawPixel(int16_t x, int16_t y, uint16_t color) {
     // 边界检查。
     if ((x < 0) || (x >= this->_width) || (y < 0) || (y >= this->_height)) {
-        printf("Pixel out of bounds: x=%d, y=%d\n", x, y);
+        std::printf("Pixel out of bounds: x=%d, y=%d\n", x, y);
         return;
     }
 
-    // 设置当前绘制区窗口。
-    // 仅写入全局缓冲区，实际显示需调用 flush()
+    // 设置像素。
     this->front_buffer[y * this->_width + x] = color;
+
+    // 更新位图。
+    this->dirty_map[y / (this->_height / 8)] |= (
+        (1 << (7 - (x / (this->_width / 8))))
+    );
+
 }
 
 // 绘制线段
@@ -249,58 +280,147 @@ void ST7789_Basic::drawRectangle(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
             dst[xx] = color;
         }
     }
+
+    // 并将涉及位图设为脏页，先写范围。
+    uint8_t dx_begin = x / (this->_width / 8), dx_end = (x + w) / (this->_width / 8),
+        dy_begin = y / (this->_height / 8), dy_end = (y + h) / (this->_height / 8);
+
+    // 然后再进行位操作。
+    for (uint8_t k = dy_begin; k < dy_end; k++) {
+        for (uint8_t j = dx_begin; j < dx_end; j++) {
+            this->dirty_map[k] |= (1<<j);
+        }
+    }
+    
 }
 
 // 填充屏幕
 void ST7789_Basic::fillScreen(uint16_t color) {
     // 将缓冲区全部填写为 color
     std::fill(this->front_buffer, this->front_buffer + this->_totalpx, color);
+
+    // 再将位图全部位写为0xFF。
+    memset(this->dirty_map, 0xFF, 8);
 }
 
-// 将缓冲区内容推到显示器，需要手动调用
-void ST7789_Basic::flush() {
-    if (!this->signal) {
-        printf("ERROR: Signal semaphore not initialized\n");
-        return;  // 防止未初始化情况
-    }
 
-    // 等待上一次 DMA 完成
-    if (xSemaphoreTake(signal, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        printf("ERROR: Timeout waiting for previous DMA transfer\n");
+// 将缓冲区内容推到显示器，需要手动调用。（无锁队列，启动！）
+void ST7789_Basic::flush() {
+    esp_err_t ret;
+
+    setWindow(0, 0, _width-1, _height-1);
+    writeCommand(RAMWR);
+
+    // 设置总大小。及缓冲区情况。
+    size_t total_bytes = _totalpx * 2;
+    uint8_t* ptr = reinterpret_cast<uint8_t*>(front_buffer);
+
+    // 设置DC引脚为数据模式
+    ret = gpio_set_level((gpio_num_t)this->_dc, 1);
+    if (ret != ESP_OK) {
+        std::printf("Failed to set DC pin level: %d\n", ret);
         return;
     }
+    
+    // 添加一个小延迟确保GPIO电平稳定
+    esp_rom_delay_us(1);
 
-    // 设置写入窗口（整屏）
-    setWindow(0, 0, _width-1, _height-1);
+    // 设置SPI传输事务。
+    spi_transaction_t* t = this->transaction_deque.front();
+    this->transaction_deque.pop_front();
 
-    // 创建 SPI 事务
-    memset(&this->transaction_dma, 0, sizeof(this->transaction_dma));
-    this->transaction_dma.length = _totalpx * 16;       // bit
-    this->transaction_dma.tx_buffer = front_buffer;     // 直接使用front_buffer
-    // 传递this指针以便在回调函数中使用
-    this->transaction_dma.user = this;
-    this->transaction_dma.flags = 0;
+    // 先重置内部的一切。
+    std::memset(t, 0, sizeof(*t));
+    t->length = total_bytes * 8;    // 长度，单位：bit
+    t->tx_buffer = ptr;             // 发送的缓冲区
+    t->user = this;                 // 事务发起用户，使用this指针
 
-    // 开启 DMA 传输
-    esp_err_t ret = spi_device_queue_trans(_spi, &this->transaction_dma, portMAX_DELAY);
+    // 轮询，发送事务。
+    ret = spi_device_polling_transmit(_spi, t);
     if (ret != ESP_OK) {
-        printf("ERROR: Failed to queue SPI transaction: %d\n", ret);
-        // 如果发送失败，释放信号量避免死锁
-        xSemaphoreGive(this->signal);
+        std::printf("SPI transmit error: %d\n", ret);
+    }
+    this->transaction_deque.push_back(t);
+
+    // 再将位图全部位写为0x00。
+    memset(this->dirty_map, 0x00, 8);
+}
+
+// 将缓冲区内容推到显示器，自动刷新脏页。
+void ST7789_Basic::flushDirty() {
+    esp_err_t ret;
+
+    const int block_w = 8;
+    const int block_h = 8;
+    int blocks_x = (_width + block_w - 1) / block_w;
+    int blocks_y = (_height + block_h - 1) / block_h;
+    
+    for (int by = 0; by < blocks_y; ++by) {
+        for (int bx = 0; bx < blocks_x; ++bx) {
+            int map_index = by * blocks_x + bx;
+            if (!(this->dirty_map[map_index / 8] & (1 << (map_index % 8)))) {
+                continue; // 这个块不脏
+            }
+
+            // 计算脏块的像素范围
+            int x0 = bx * block_w;
+            int y0 = by * block_h;
+            int x1 = std::min(x0 + block_w - 1, _width - 1);
+            int y1 = std::min(y0 + block_h - 1, _height - 1);
+
+            // 设置窗口
+            setWindow(x0, y0, x1, y1);
+            writeCommand(RAMWR);
+
+            // 写入页缓冲区。
+            for (int y = y0; y <= y1; ++y) {
+                for (int x = x0; x <= x1; ++x) {
+                    this->temp_page_buffer[(y - y0) * block_w + (x - x0)] = this->front_buffer[y * _width + x];
+                }
+            }
+
+            // 选择当前窗口内所有buffer，并发送。
+            // 先上数据位。
+            ret = gpio_set_level((gpio_num_t)this->_dc, 1);
+            if (ret != ESP_OK) {
+                std::printf("Failed to set DC pin: %d\n", ret);
+                return;
+            }
+            esp_rom_delay_us(1);
+
+            spi_transaction_t* t = this->transaction_deque.front();
+            this->transaction_deque.pop_front();
+            std::memset(t, 0, sizeof(*t));
+            
+            t->length = (x1 - x0 + 1) * 2 * 8;                 // 每行像素字节数，乘以页码列数。
+            t->tx_buffer = (uint8_t*)this->temp_page_buffer;   // 当前行首地址
+            t->user = this;
+            ret = spi_device_polling_transmit(_spi, t);
+            if (ret != ESP_OK) {
+                std::printf("SPI transmit error: %d\n", ret);
+            }
+            this->transaction_deque.push_back(t);
+
+            // 清除脏标志
+            this->dirty_map[map_index / 8] &= ~(1 << (map_index % 8));
+        }
     }
 }
+
 
 // 析构函数，释放缓冲区
 ST7789_Basic::~ST7789_Basic() {
     // 清理buffer
     if (this->front_buffer) {
-        delete[] this->front_buffer;
+        heap_caps_free(this->front_buffer);
         this->front_buffer = nullptr;
     }
 
-    // 删除信号量。
-    if (this->signal) {
-        vSemaphoreDelete(this->signal);
+    // 删除事务队列内事务。
+    for (uint16_t i = 0; i < this->transaction_num; i++) {
+        delete this->transaction_deque.front();
+        this->transaction_deque.front() = nullptr;
+        this->transaction_deque.pop_front();
     }
 }
 
@@ -312,31 +432,33 @@ void ST7789_Basic::setBacklight(bool state){
 // private:
 // 首先，需要一个初始化SPI协议的函数。
 void ST7789_Basic::initSPI() {
-    // 将所有涉及的信号线加入上拉电阻
+    // 将所有涉及的信号线加入上拉电阻。
 
-    printf("Initializing SPI bus...\n");
+    std::printf("Initializing SPI bus...\n");
     this->_buscfg.mosi_io_num = this->_din;  // data in
     this->_buscfg.miso_io_num = -1;          // data out - 这块屏幕不需要它
     this->_buscfg.sclk_io_num = this->_clk;  // 时钟源
     this->_buscfg.quadwp_io_num = -1;        // 这是什么？
     this->_buscfg.quadhd_io_num = -1;        // 这啥？
-    this->_buscfg.max_transfer_sz = this->_totalpx * 2;    // 最大传输数
+    // max_transfer_sz is in BYTES; limit to one row (width * 2 bytes for RGB565)
+    this->_buscfg.max_transfer_sz = this->_totalpx * 8;
     // 移除可能导致问题的中断标志和CPU亲和性设置
     this->_buscfg.intr_flags = 0;
+    this->_buscfg.isr_cpu_id = ESP_INTR_CPU_AFFINITY_AUTO;
 
     esp_err_t ret;
 
     // 初始化SPI总线
     ret = spi_bus_initialize(SPI2_HOST, &_buscfg, SPI_DMA_CH_AUTO);
     if (ret != ESP_OK) {
-        printf("Failed to initialize SPI bus: %d\n", ret);  
+        std::printf("Failed to initialize SPI bus: %d\n", ret);  
         return;
     }
 
-    printf("Configuring SPI device...\n");
+    std::printf("Configuring SPI device...\n");
     this->_devcfg.clock_speed_hz = this->_clockSpeed;     // 时钟频率
     this->_devcfg.spics_io_num = this->_cs;               // chip select端口选择
-    this->_devcfg.queue_size = 16;                        // 增加指令队列大小
+    this->_devcfg.queue_size = 8;                        // 增加指令队列大小
     this->_devcfg.flags = SPI_DEVICE_HALFDUPLEX;          // 半双工模式
     this->_devcfg.mode = 0;                               // SPI模式0
     this->_devcfg.pre_cb = nullptr;
@@ -347,95 +469,100 @@ void ST7789_Basic::initSPI() {
     ret = spi_bus_add_device(SPI2_HOST, &_devcfg, &_spi);
 
     if (ret != ESP_OK) {
-        printf("Failed to add SPI device: %d\n", ret);
+        std::printf("Failed to add SPI device: %d\n", ret);
         _spi = nullptr; // 确保_spi为nullptr表示初始化失败
         return;
     }
     
-    printf("SPI device configured successfully.\n");
+    std::printf("SPI device configured successfully.\n");
 }
 
 // 写入指令。
 void ST7789_Basic::writeCommand(uint8_t command) {
-    //printf("Writing command: 0x%02X\n", command);
+    //std::printf("Writing command: 0x%02X\n", command);
     
     // 检查SPI设备是否已正确初始化
     if (this->_spi == nullptr) {
-        printf("WARNING: SPI device not initialized!\n");
+        std::printf("WARNING: SPI device not initialized!\n");
         return;
     }
 
     // 检查GPIO是否正确设置
     if (this->_dc < 0 || this->_dc >= GPIO_NUM_MAX) {
-        printf("ERROR: Invalid DC pin: %d\n", this->_dc);
+        std::printf("ERROR: Invalid DC pin: %d\n", this->_dc);
         return;
     }
 
     // 设置DC引脚为命令模式
     esp_err_t ret = gpio_set_level((gpio_num_t)this->_dc, 0);  // 拉低数据/命令引脚，进入指令模式
     if (ret != ESP_OK) {
-        printf("Failed to set DC pin level: %d\n", ret);
+        std::printf("Failed to set DC pin level: %d\n", ret);
         return;
     }
     
     // 添加一个小延迟确保GPIO电平稳定
     esp_rom_delay_us(1);
-    
+
+    // 获取SPI事务。
+    spi_transaction_t *t = this->transaction_deque.front();
+    this->transaction_deque.pop_front();
+
     // 初始化SPI事务
-    this->transaction_dma.length = 8;           // 1 byte = 8 bits
-    this->transaction_dma.tx_buffer = &command; // 发送缓冲区指向命令字节
-    this->transaction_dma.user = this;          // 添加user字段确保回调函数正常工作
-    //printf("SPI transferring ready.\n");
+    std::memset(t, 0, sizeof(*t));
+    t->length = 8;           // 1 byte = 8 bits
+    t->tx_buffer = &command; // 发送缓冲区指向命令字节
+    t->user = this;          // 添加user字段确保回调函数正常工作
+    //std::printf("SPI transferring ready.\n");
 
     // 执行SPI传输
-    ret = spi_device_polling_transmit(this->_spi, &this->transaction_dma);
+    ret = spi_device_polling_transmit(this->_spi, t);
     if (ret != ESP_OK) {
-        printf("SPI command error: %d\n", ret);
+        std::printf("SPI command error: %d\n", ret);
     }
+    this->transaction_deque.push_back(t);
 }
 
-// 写入数据。
+// 写入数据，或者说是命令的操作数。
 void ST7789_Basic::writeData(const uint8_t data[], size_t len) {
     // 检查SPI设备是否已正确初始化
     if (this->_spi == nullptr) {
-        printf("SPI device not initialized!\n");
+        std::printf("SPI device not initialized!\n");
         return;
     }
 
     // 检查参数
     if (data == nullptr || len == 0) {
-        printf("Invalid data or length\n");
+        std::printf("Invalid data or length\n");
         return;
     }
-
-    // 调试信息。
-    // printf("Writing data: ");
-    // for (size_t i = 0; i < len; i++) {
-    //     printf("%02X ", data[i]);
-    // }
-    // printf("\n");
 
     // 设置DC引脚为数据模式
     esp_err_t ret = gpio_set_level((gpio_num_t)this->_dc, 1);
     if (ret != ESP_OK) {
-        printf("Failed to set DC pin level: %d\n", ret);
+        std::printf("Failed to set DC pin level: %d\n", ret);
         return;
     }
     
     // 添加一个小延迟确保GPIO电平稳定
     esp_rom_delay_us(1);
 
+    // 配置SPI事务
+    spi_transaction_t *t = this->transaction_deque.front();
+    this->transaction_deque.pop_front();
+
     // 初始化 SPI 事务
-    this->transaction_dma.flags = 0;            // 默认无特殊标志
-    this->transaction_dma.length = 8 * len;     // 总发送bit数
-    this->transaction_dma.tx_buffer = data;     // 数据指针，直接指向传入的数据数组
-    this->transaction_dma.user = this;          // 添加user字段确保回调函数正常工作
+    t->flags = 0;            // 默认无特殊标志
+    t->length = 8 * len;     // 总发送bit数
+    t->tx_buffer = data;     // 数据指针，直接指向传入的数据数组
+    t->user = this;          // 添加user字段确保回调函数正常工作
 
     // 执行SPI传输
-    ret = spi_device_polling_transmit(this->_spi, &this->transaction_dma);
+    ret = spi_device_polling_transmit(this->_spi, t);
     if (ret != ESP_OK) {
-        printf("SPI data transmission error: %d\n", ret);
+        std::printf("SPI data transmission error: %d\n", ret);
     }
+
+    this->transaction_deque.push_back(t);
 }
 
 // 设置窗口。
@@ -469,12 +596,96 @@ void ST7789_Basic::setWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
 
 ST7789::ST7789(const ST7789_Config& config) :
     ST7789_Basic(config) {
-        // 先直接调用父类构造函数。
-
+        // 先直接调用父类构造函数，然后重置鼠标指针位置。
+        this->cursor.x = 32;
+        this->cursor.y = 32;
     }
 
-void ST7789::printf(const char* arg, ...) {
+void ST7789::printf(const char* fmt, ...) {
+    char buffer[256];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
 
+    for (size_t i = 0; i < std::strlen(buffer); i++) {
+        // 非显示字符的场合进行特殊处理，但不绘图。
+        switch(buffer[i]) {
+            case '\n':  // 换行
+                cursor.x = cursor.begin_x;
+                cursor.y += using_font->height;
+                break;
+            case '\r':  // 回车，只复位X，不动Y
+                cursor.x = cursor.begin_x;
+                break;
+            case '\t':  // 制表符，每4个字符宽度
+                cursor.x += using_font->width * 4;
+                if (cursor.x + using_font->width > getWidth()) {
+                    cursor.x = cursor.begin_x;
+                    cursor.y += using_font->height;
+                }
+                break;
+            default: {  // 普通字符
+                drawChar(this->cursor.x, this->cursor.y, buffer[i], this->using_font, 
+                    this->cursor.color);
+                // 加宽。
+                this->cursor.x += this->using_font->width;
+                // 超越边界的场合，换行。
+                if (this->cursor.x + this->using_font->width > getWidth()) {
+                    this->cursor.x = this->cursor.begin_x;
+                    this->cursor.y += this->using_font->height;
+                }
+                break;
+            }
+        }
+    }
+    return;
+}
+
+void ST7789::drawFrame(
+    uint16_t x, uint16_t y, uint16_t w, uint16_t h, 
+    uint16_t color_inner, uint16_t color_frame, uint16_t frame_width
+) {
+    this->drawRectangle(x, y, w, h, color_frame);
+    this->drawRectangle(x + frame_width, y + frame_width, w - 2 * frame_width, h - 2 * frame_width, color_inner);
+}
+
+void ST7789::drawChar(
+    uint16_t x, uint16_t y, char c, const FontDef* font, uint16_t color
+) {
+    if (!font) return;
+    
+    if (c < 32 || c > 126) return;
+
+    // 解析字体尺寸。
+    uint8_t font_width = font->width, font_height = font->height;
+    // 初始化x和y的位置。
+    uint16_t now_x = x, now_y = y;
+
+    // 选中字母。
+    Alphabet letter = font->data[c-32];
+            
+    // 遍历像素并写入缓冲区。6列8行，所以int8_t的次序是从上到下解析。
+    for (int16_t k = 0; k < font_width; k++) {
+        // 当前位图列。
+        uint8_t column_bitmap = letter.letter[k];
+        for (int16_t j = 0; j < font_height; j++) {
+            // font_height = 8，此时必须一个一个地、自上而下地解析。
+            // 该像素是否为1？
+            uint8_t mask = (1<<j);
+            // uint8_t mask = ((1<<(font_height-1))>>j);
+            if ((mask & column_bitmap)) {
+                this->front_buffer[now_x * this->getWidth() + now_y] = color;
+            } else {
+                this->front_buffer[now_x * this->getWidth() + now_y] = 0xFFFF;
+            }
+            // 继续解析。
+            now_y++;
+        }
+        // 下一列。
+        now_y = y; now_x++;
+    }
+    
 }
 
 } // namespace Luna

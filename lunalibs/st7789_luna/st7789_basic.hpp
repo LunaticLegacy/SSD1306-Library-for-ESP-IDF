@@ -2,6 +2,7 @@
 #define __ST7789_BASIC_H
 
 #include <cstdint>
+#include <deque>
 
 // 这个东西采用全双工通信，SPI。且具有一个背光接口。
 #include "driver/spi_master.h"
@@ -63,6 +64,9 @@ public:
     // 将全局缓冲区内容写入显示器，需手动调用以更新屏幕
     void flush();
 
+    // 有脏页的flush。
+    void flushDirty();
+
     // 析构函数，释放缓冲区
     virtual ~ST7789_Basic();
 
@@ -80,7 +84,7 @@ public:
     uint16_t getWidth() const { return this->_width; }
     
 
-private:
+protected:
     // 硬件参数。
     int16_t _width, _height;  // 屏幕分辨率。
     gpio_num_t _din, _clk, _cs, _dc, _rst, _bl;  // 引脚编号。
@@ -88,18 +92,19 @@ private:
     // SPI无关：dc：数据/命令引脚。rst：复位引脚。bl：背光引脚。
     // dc拉低时接指令，拉高时接数据。
 
-    // SPI总线配置。
-    spi_bus_config_t _buscfg;
-    spi_device_interface_config_t _devcfg;
-    spi_device_handle_t _spi;  // 操作头。
+    // SPI总线相关设置。
+    spi_bus_config_t _buscfg;               // 总线配置。
+    spi_device_interface_config_t _devcfg;  // 设备接口配置。
+    spi_device_handle_t _spi;               // 操作头。
 
     // 用于DMA的类内全局SPI事务。
-    spi_transaction_t transaction_dma;
+    std::deque<spi_transaction_t*> transaction_deque;
+    uint16_t transaction_num = 5;
 
     // 时钟频率设置。
     uint32_t _clockSpeed;
 
-    // 颜色模式。
+    // 颜色模式。（似乎用不上？）
     uint8_t _colorMode;
 
     // 当前窗口长宽。
@@ -110,9 +115,13 @@ private:
 
     // 未初始化的数组，等屏幕宽高数据出现后再初始化。
     uint16_t *front_buffer = nullptr;   // 前缓冲区。
-    SemaphoreHandle_t signal;           // DMA已完成的信号量。qhandle_t
-    // q_handle_t是一个指针。
 
+    // 脏页位图，将整个范围分解为8*8。
+    uint8_t *dirty_map = nullptr;
+
+    // 一个临时的页缓冲区。
+    uint16_t *temp_page_buffer;
+    
     // 初始化SPI配置，该函数需在构造函数时调用。这个东西同时也要作为初始化DMA的内容。
     void initSPI();
 
@@ -131,17 +140,15 @@ private:
             printf("| WARNING: No user found.\n");
             return;
         }
-        
-        ST7789_Basic* obj = static_cast<ST7789_Basic*>(t->user);
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        xSemaphoreGiveFromISR(obj->signal, &xHigherPriorityTaskWoken);
-        if (xHigherPriorityTaskWoken) portYIELD_FROM_ISR();
+        // 将t的user解释为ST7789_BASIC实例（的指针）。
+        // ST7789_Basic* obj = static_cast<ST7789_Basic*>(t->user);
+
     }
 };
 
 // =-=-=-=-=-=-=-=-=-=-=-=-= 图形库开始 =-=-=-=-=-=-=-=-=-=-=-=-=
 
-class ST7789 : private ST7789_Basic {
+class ST7789 : public ST7789_Basic {
 public:
     ST7789() = delete;
     ST7789(const ST7789& other) = delete;
@@ -150,9 +157,41 @@ public:
 
     void printf(const char* arg, ...);
 
+    // 移动鼠标指针，不重载。
+    void moveCursor(const uint16_t x, const uint16_t y) {
+        this->cursor.x = x; this->cursor.y = y;
+        this->cursor.begin_x = x; this->cursor.begin_y = y;
+    }
+
+    void changeCursorColor(const uint16_t color) {
+        this->cursor.color = color;
+    }
+
+    // 画框。
+    void drawFrame(
+        uint16_t x, uint16_t y, uint16_t w, uint16_t h, 
+        uint16_t color_inner, uint16_t color_frame, uint16_t frame_width
+    );
+
 private:
     // 导入正在使用的字体。
     const FontDef* using_font = &Font_6x8;
+
+    // 保存一个uint16_t数组，作为当前屏幕鼠标指针位置。
+    typedef struct cursor {
+        uint16_t x = 0;
+        uint16_t y = 0;
+        uint16_t begin_x = 0;
+        uint16_t begin_y = 0;
+        uint16_t color = 0xFFFF;
+    } Cursor;
+    // 指针。
+    Cursor cursor;
+
+    // 绘制字符串，目前暂不支持绘制非ASCII字符。
+    void drawChar(
+        uint16_t x, uint16_t y, char c, const FontDef* font, uint16_t color
+    );
 
 };
 

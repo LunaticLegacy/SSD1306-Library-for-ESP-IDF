@@ -9,7 +9,7 @@ include(g:/ESP-IDF/IDF/v5.4/esp-idf/tools/cmake/project.cmake)
 set(LUNALIBS ${CMAKE_CURRENT_LIST_DIR}/lunalibs)
 
 set(EXTRA_COMPONENT_DIRS 
-    ${LUNALIBS}/st7789_luna 
+    ${LUNALIBS}/st7789_luna
 )
 
 include_directories(${CMAKE_SOURCE_DIR}/lunalibs)
