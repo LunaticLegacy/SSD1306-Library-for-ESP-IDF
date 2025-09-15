@@ -1,67 +1,59 @@
-| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C6 | ESP32-H2 | ESP32-P4 | ESP32-S2 | ESP32-S3 |
-| ----------------- | ----- | -------- | -------- | -------- | -------- | -------- | -------- | -------- |
+## 说明：
+基于i2c_master.h开发，且整个库使用C++，而不是C。
 
-# I2C OLED example
+## 协议支持情况：
 
-[esp_lcd](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/lcd.html) supports I2C interfaced OLED LCD, whose color depth is usually 1bpp.
+| 支持协议  | 支持屏幕 | 环境     | 是否支持 |
+| -------- | -------- | -------- | -------- |
+| I2C_old  | SSD1306  | ESP-IDF  | ×        |
+| I2C_new  | SSD1306  | ESP-IDF  | √        |
+| SPI      | SSD1306  | ESP-IDF  | ×        |
 
-This example shows how to make use of the SSD1306 panel driver from `esp_lcd` component to facilitate the porting of LVGL library. In the end, example will display a scrolling text on the OLED screen. For more information about porting the LVGL library, you can also refer to another [lvgl porting example](../i80_controller/README.md).
 
-## How to use the example
+## 使用例：
+请先在使用之前，#include "ssd1306_luna/ssd1306_luna.h" <br>
+然后在实例化后使用。<br>
+个人的代码习惯是不适用app_main作为主函数，而是另定义一个main函数作为主函数。<br>
 
-### Hardware Required
+```
+// C++  main.cpp
+#include <stdio.h>
+#include <driver/i2c_master.h>
+#include "ssd1306_luna/ssd1306_luna.h"
 
-* An ESP development board
-* An SSD1306 OLED LCD, with I2C interface
-* An USB cable for power supply and programming
+SSD1306_SHAPES* screen = nullptr;  // 暂时不初始化。
 
-### Hardware Connection
+int main() {
+    printf("| Entered main().\n");
+    screen = new SSD1306_SHAPES();  // 在这里初始化。
+    screen->draw_rectangle(2, 2, 124, 60, true, false);
+    screen->print_buffer();
+    screen->flush();
+    // 3秒后结束运行。
+    vTaskDelay(3000 / portTICK_PERIOD_MS);
+    screen->clear_screen_buffer();
+    screen->flush();
 
-The connection between ESP Board and the LCD is as follows:
+    printf("| Program finished.\n");
+    return 0;
+}
 
-```text
-      ESP Board                       OLED LCD (I2C)
-+------------------+              +-------------------+
-|               GND+--------------+GND                |
-|                  |              |                   |
-|               3V3+--------------+VCC                |
-|                  |              |                   |
-|               SDA+--------------+SDA                |
-|                  |              |                   |
-|               SCL+--------------+SCL                |
-+------------------+              +-------------------+
+extern "C" void app_main(void) {
+    printf("| Hello world!.\n");
+    main();  // 主函数。
+}
 ```
 
-The GPIO number used by this example can be changed in [lvgl_example_main.c](main/i2c_oled_example_main.c). Please pay attention to the I2C hardware device address as well, you should refer to your module's spec and schematic to determine that address.
+## 关于图形内容：
+所有的图形内容都是基本内容，目前尚未完美实现。
 
-### Build and Flash
+## 注意：
+(2025/3/9) 
+ESP-IDF目前版本的新版驱动里，异步I2C驱动很有问题。所以目前仅限同步驱动。<br>
+（等什么时候这玩意修好了我再做异步）
 
-Run `idf.py -p PORT build flash monitor` to build, flash and monitor the project. A scrolling text will show up on the LCD as expected.
+## 作者：
+月と猫 - LunaNeko <br>
+CC-BY-SA
 
-The first time you run `idf.py` for the example will cost extra time as the build system needs to address the component dependencies and downloads the missing components from registry into `managed_components` folder.
-
-(To exit the serial monitor, type ``Ctrl-]``.)
-
-See the [Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/latest/get-started/index.html) for full steps to configure and use ESP-IDF to build projects.
-
-### Example Output
-
-```bash
-...
-I (308) main_task: Started on CPU0
-I (318) main_task: Calling app_main()
-I (318) example: Initialize I2C bus
-I (318) gpio: GPIO[3]| InputEn: 1| OutputEn: 1| OpenDrain: 1| Pullup: 1| Pulldown: 0| Intr:0
-I (328) gpio: GPIO[4]| InputEn: 1| OutputEn: 1| OpenDrain: 1| Pullup: 1| Pulldown: 0| Intr:0
-I (338) example: Install panel IO
-I (338) example: Install SSD1306 panel driver
-I (448) example: Initialize LVGL
-I (448) LVGL: Starting LVGL task
-I (448) example: Display LVGL Scroll Text
-I (448) main_task: Returned from app_main()
-...
-```
-
-## Troubleshooting
-
-For any technical queries, please open an [issue](https://github.com/espressif/esp-idf/issues) on GitHub. We will get back to you soon.
+最后更新日期：2025/5/27
