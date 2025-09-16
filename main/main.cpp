@@ -8,7 +8,7 @@
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
 
-#include "st7789_luna/st7789_basic.hpp"
+#include "st7789_luna/st7789.hpp"
 
 // 喂狗函数，用于看门狗。
 #define feed esp_task_wdt_reset

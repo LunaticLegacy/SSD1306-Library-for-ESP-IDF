@@ -294,6 +294,99 @@ void ST7789_Basic::drawRectangle(uint16_t x, uint16_t y, uint16_t w, uint16_t h,
     
 }
 
+// 实心圆
+void ST7789_Basic::drawCircle(uint16_t x, uint16_t y, uint16_t r, uint16_t color) {
+    // 优化：对每一行计算水平跨度并一次性填充，复杂度约为 O(r)
+    if (r == 0) {
+        drawPixel(x, y, color);
+        return;
+    }
+
+    const int img_w = this->_width;
+    const int img_h = this->_height;
+    const double r2 = (double)r * (double)r;
+
+    for (int16_t dy = -((int16_t)r); dy <= (int16_t)r; ++dy) {
+        int16_t py = y + dy;
+        if (py < 0 || py >= img_h) continue;
+
+        // 计算当前行的水平跨度 dx，满足 dx^2 + dy^2 <= r^2
+        double tmp = r2 - (double)dy * (double)dy;
+        if (tmp < 0) continue;
+        int16_t dx = (int16_t)std::floor(std::sqrt(tmp));
+
+        int16_t x0 = x - dx;
+        int16_t x1 = x + dx;
+
+        // 裁剪到画面范围
+        if (x0 < 0) x0 = 0;
+        if (x1 >= img_w) x1 = img_w - 1;
+        if (x0 > x1) continue;
+
+        // 快速填充这条水平线
+        uint16_t* dst = &this->front_buffer[py * img_w + x0];
+        int len = (int)x1 - (int)x0 + 1;
+        for (int i = 0; i < len; ++i) dst[i] = color;
+
+        // 更新 dirty_map （以 drawRectangle 的方式标记块）
+        uint8_t dx_begin = x0 / (this->_width / 8);
+        uint8_t dx_end = x1 / (this->_width / 8);
+        uint8_t dy_idx = py / (this->_height / 8);
+        if (dy_idx >= 0 && dy_idx < 8) {
+            for (uint8_t j = dx_begin; j <= dx_end; ++j) {
+                this->dirty_map[dy_idx] |= (1 << j);
+            }
+        }
+    }
+}
+
+// 实心椭圆
+void ST7789_Basic::drawEllipse(uint16_t x, uint16_t y, uint16_t a, uint16_t b, uint16_t color) {
+    // 优化：按行计算水平跨度并填充，每行用公式求出 x 的范围
+    if (a == 0 && b == 0) {
+        drawPixel(x, y, color);
+        return;
+    }
+
+    const int img_w = this->_width;
+    const int img_h = this->_height;
+    const double a_d = (double)a;
+    const double b_d = (double)b;
+    const double b2 = b_d * b_d;
+
+    for (int16_t dy = -((int16_t)b); dy <= (int16_t)b; ++dy) {
+        int16_t py = y + dy;
+        if (py < 0 || py >= img_h) continue;
+
+        // x_range = a * sqrt(1 - (dy^2)/(b^2))
+        double frac = 1.0 - ((double)dy * (double)dy) / b2;
+        if (frac < 0.0) continue;
+        int16_t dx = (int16_t)std::floor(a_d * std::sqrt(frac));
+
+        int16_t x0 = x - dx;
+        int16_t x1 = x + dx;
+
+        // 裁剪
+        if (x0 < 0) x0 = 0;
+        if (x1 >= img_w) x1 = img_w - 1;
+        if (x0 > x1) continue;
+
+        uint16_t* dst = &this->front_buffer[py * img_w + x0];
+        int len = (int)x1 - (int)x0 + 1;
+        for (int i = 0; i < len; ++i) dst[i] = color;
+
+        // 更新 dirty_map（与 drawRectangle 保持一致）
+        uint8_t dx_begin = x0 / (this->_width / 8);
+        uint8_t dx_end = x1 / (this->_width / 8);
+        uint8_t dy_idx = py / (this->_height / 8);
+        if (dy_idx < 8) {
+            for (uint8_t j = dx_begin; j <= dx_end; ++j) {
+                this->dirty_map[dy_idx] |= (1 << j);
+            }
+        }
+    }
+}
+
 // 填充屏幕
 void ST7789_Basic::fillScreen(uint16_t color) {
     // 将缓冲区全部填写为 color
@@ -352,61 +445,93 @@ void ST7789_Basic::flushDirty() {
 
     const int block_w = 8;
     const int block_h = 8;
-    int blocks_x = (_width + block_w - 1) / block_w;
-    int blocks_y = (_height + block_h - 1) / block_h;
-    
-    for (int by = 0; by < blocks_y; ++by) {
-        for (int bx = 0; bx < blocks_x; ++bx) {
-            int map_index = by * blocks_x + bx;
-            if (!(this->dirty_map[map_index / 8] & (1 << (map_index % 8)))) {
-                continue; // 这个块不脏
-            }
+    const int blocks_x_all = (_width + block_w - 1) / block_w;
+    const int blocks_y_all = (_height + block_h - 1) / block_h;
 
-            // 计算脏块的像素范围
+    // 我们的 dirty_map 是 uint8_t[8]：按行（by）索引，每位对应 bx。
+    // 如果实际 blocks_x_all 或 blocks_y_all 超过 8，需要扩展 dirty_map；在这里我们做保护/截断。
+    if (blocks_x_all > 8 || blocks_y_all > 8) {
+        std::printf("Warning: blocks_x_all=%d, blocks_y_all=%d exceed dirty_map capacity 8x8. Truncating.\n",
+                    blocks_x_all, blocks_y_all);
+    }
+    const int blocks_x = std::min(blocks_x_all, 8);
+    const int blocks_y = std::min(blocks_y_all, 8);
+
+    const int pixel_bytes = 2; // uint16_t pixels
+
+    // 减少重复计算
+    const int img_w = this->_width;
+    // 缓冲区指针
+    uint16_t* fb = this->front_buffer;
+    uint16_t* tmp_buf = this->temp_page_buffer; // 假设大小 >= block_w * block_h
+
+    // 复用 transaction 指针（避免反复 memset）
+    spi_transaction_t* t = nullptr;
+    if (!this->transaction_deque.empty()) {
+        t = this->transaction_deque.front();
+    } else {
+        std::printf("No SPI transaction available in deque!\n");
+        return;
+    }
+
+    for (int by = 0; by < blocks_y; ++by) {
+        uint8_t row_mask = this->dirty_map[by]; // 每个位对应 bx
+        if (row_mask == 0) continue; // 整行没脏
+        for (int bx = 0; bx < blocks_x; ++bx) {
+            if (!(row_mask & (1 << bx))) continue; // 该块不是脏的
+
+            // 计算脏块像素范围（裁剪）
             int x0 = bx * block_w;
             int y0 = by * block_h;
             int x1 = std::min(x0 + block_w - 1, _width - 1);
             int y1 = std::min(y0 + block_h - 1, _height - 1);
+            int w = x1 - x0 + 1;
+            int h = y1 - y0 + 1;
+            int row_bytes = w * pixel_bytes;
+            int page_bytes = h * w * pixel_bytes;
 
-            // 设置窗口
+            // 设置窗口并发送写入命令
             setWindow(x0, y0, x1, y1);
             writeCommand(RAMWR);
 
-            // 写入页缓冲区。
-            for (int y = y0; y <= y1; ++y) {
-                for (int x = x0; x <= x1; ++x) {
-                    this->temp_page_buffer[(y - y0) * block_w + (x - x0)] = this->front_buffer[y * _width + x];
-                }
+            // 将每一行 memcpy 到 temp_page_buffer（一次 memcpy 一整行）
+            // temp buffer 布局： 行优先 (y-y0)*w + (x-x0)
+            uint8_t* tmp_dst_bytes = (uint8_t*)tmp_buf;
+            for (int yy = y0; yy <= y1; ++yy) {
+                uint16_t* src_row = fb + (yy * img_w + x0);
+                uint8_t* dst_row = tmp_dst_bytes + (yy - y0) * row_bytes;
+                std::memcpy(dst_row, (uint8_t*)src_row, (size_t)row_bytes);
             }
 
-            // 选择当前窗口内所有buffer，并发送。
-            // 先上数据位。
+            // 设置 DC 为 data（1）一次即可（减少 syscalls）
             ret = gpio_set_level((gpio_num_t)this->_dc, 1);
             if (ret != ESP_OK) {
                 std::printf("Failed to set DC pin: %d\n", ret);
-                return;
+                // 不 clear 脏位，以后重试
+                continue;
             }
-            esp_rom_delay_us(1);
 
-            spi_transaction_t* t = this->transaction_deque.front();
-            this->transaction_deque.pop_front();
-            std::memset(t, 0, sizeof(*t));
-            
-            t->length = (x1 - x0 + 1) * 2 * 8;                 // 每行像素字节数，乘以页码列数。
-            t->tx_buffer = (uint8_t*)this->temp_page_buffer;   // 当前行首地址
+            // 准备 spi_transaction（只修改需要字段）
+            // 传输长度以 bits 为单位（ESP-IDF SPI 事务长度是 bits）
+            std::memset(t, 0, sizeof(*t)); // 这里清 1 次以确保安全：可以改为仅清字段
+            t->length = page_bytes * 8; // bits
+            t->tx_buffer = (uint8_t*)tmp_buf;
             t->user = this;
+
+            // 同步传输（阻塞）
             ret = spi_device_polling_transmit(_spi, t);
             if (ret != ESP_OK) {
                 std::printf("SPI transmit error: %d\n", ret);
+                // 不清除脏位，这样下一次会重传
+            } else {
+                // 仅在成功时清脏标志
+                this->dirty_map[by] &= ~(1 << bx);
             }
-            this->transaction_deque.push_back(t);
-
-            // 清除脏标志
-            this->dirty_map[map_index / 8] &= ~(1 << (map_index % 8));
+            // 复用 transaction：如果你期望 deque 管理，保持原先的 deque 结构即可
+            // 保持 t 在 deque 的头（原先你 pop 后 push 回）——这里我们不 pop/push，直接复用 front。
         }
     }
 }
-
 
 // 析构函数，释放缓冲区
 ST7789_Basic::~ST7789_Basic() {
@@ -590,102 +715,6 @@ void ST7789_Basic::setWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
     // 更新窗口大小。
     this->_windowWidth = x1 - x0 + 1;
     this->_windowHeight = y1 - y0 + 1;
-}
-
-// =-=-=-=-=-=-=-=-=-=-=-=-= 图形库开始 =-=-=-=-=-=-=-=-=-=-=-=-=
-
-ST7789::ST7789(const ST7789_Config& config) :
-    ST7789_Basic(config) {
-        // 先直接调用父类构造函数，然后重置鼠标指针位置。
-        this->cursor.x = 32;
-        this->cursor.y = 32;
-    }
-
-void ST7789::printf(const char* fmt, ...) {
-    char buffer[256];
-    va_list args;
-    va_start(args, fmt);
-    std::vsnprintf(buffer, sizeof(buffer), fmt, args);
-    va_end(args);
-
-    for (size_t i = 0; i < std::strlen(buffer); i++) {
-        // 非显示字符的场合进行特殊处理，但不绘图。
-        switch(buffer[i]) {
-            case '\n':  // 换行
-                cursor.x = cursor.begin_x;
-                cursor.y += using_font->height;
-                break;
-            case '\r':  // 回车，只复位X，不动Y
-                cursor.x = cursor.begin_x;
-                break;
-            case '\t':  // 制表符，每4个字符宽度
-                cursor.x += using_font->width * 4;
-                if (cursor.x + using_font->width > getWidth()) {
-                    cursor.x = cursor.begin_x;
-                    cursor.y += using_font->height;
-                }
-                break;
-            default: {  // 普通字符
-                drawChar(this->cursor.x, this->cursor.y, buffer[i], this->using_font, 
-                    this->cursor.color);
-                // 加宽。
-                this->cursor.x += this->using_font->width;
-                // 超越边界的场合，换行。
-                if (this->cursor.x + this->using_font->width > getWidth()) {
-                    this->cursor.x = this->cursor.begin_x;
-                    this->cursor.y += this->using_font->height;
-                }
-                break;
-            }
-        }
-    }
-    return;
-}
-
-void ST7789::drawFrame(
-    uint16_t x, uint16_t y, uint16_t w, uint16_t h, 
-    uint16_t color_inner, uint16_t color_frame, uint16_t frame_width
-) {
-    this->drawRectangle(x, y, w, h, color_frame);
-    this->drawRectangle(x + frame_width, y + frame_width, w - 2 * frame_width, h - 2 * frame_width, color_inner);
-}
-
-void ST7789::drawChar(
-    uint16_t x, uint16_t y, char c, const FontDef* font, uint16_t color
-) {
-    if (!font) return;
-    
-    if (c < 32 || c > 126) return;
-
-    // 解析字体尺寸。
-    uint8_t font_width = font->width, font_height = font->height;
-    // 初始化x和y的位置。
-    uint16_t now_x = x, now_y = y;
-
-    // 选中字母。
-    Alphabet letter = font->data[c-32];
-            
-    // 遍历像素并写入缓冲区。6列8行，所以int8_t的次序是从上到下解析。
-    for (int16_t k = 0; k < font_width; k++) {
-        // 当前位图列。
-        uint8_t column_bitmap = letter.letter[k];
-        for (int16_t j = 0; j < font_height; j++) {
-            // font_height = 8，此时必须一个一个地、自上而下地解析。
-            // 该像素是否为1？
-            uint8_t mask = (1<<j);
-            // uint8_t mask = ((1<<(font_height-1))>>j);
-            if ((mask & column_bitmap)) {
-                this->front_buffer[now_x * this->getWidth() + now_y] = color;
-            } else {
-                this->front_buffer[now_x * this->getWidth() + now_y] = 0xFFFF;
-            }
-            // 继续解析。
-            now_y++;
-        }
-        // 下一列。
-        now_y = y; now_x++;
-    }
-    
 }
 
 } // namespace Luna
