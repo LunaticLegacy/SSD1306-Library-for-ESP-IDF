@@ -95,71 +95,13 @@ void stressTestAll() {
 }
 
 
-void stressTestDirty() {
-    const uint16_t colors[] = {0xF800, 0x07E0, 0x001F, 0xFFE0, 0xF81F, 0x07FF, 0xFFFF};
-    const int numColors = sizeof(colors) / sizeof(colors[0]);
-    const int rectSize = 10;
-    const int max_cycles = 500;
-    int64_t cycle_duration = 0.0;
-
-    int64_t total_start = esp_timer_get_time();  // 总开始时间
-
-    for (int cycle = 0; cycle < max_cycles; cycle++) {
-        int64_t cycle_start = esp_timer_get_time();  // 单次刷新开始时间
-
-        // 随机选择屏幕区域绘制，模拟局部更新
-        for (int i = 0; i < 50; i++) {  // 每次只更新50个小块
-            int x = (rand() % (screen.getWidth() / rectSize)) * rectSize;
-            int y = (rand() % (screen.getHeight() / rectSize)) * rectSize;
-            int colorIndex = (x / rectSize + y / rectSize + cycle) % numColors;
-
-            screen.drawRectangle(x, y, rectSize, rectSize, colors[colorIndex]);
-        }
-
-        // 显示动态帧信息
-        screen.moveCursor(88, 108);
-        screen.printf("FPS: %.2f\nCycle: %d\nProc: %.2f%%", 
-            1000000.0 / (cycle_duration > 0 ? cycle_duration : 1), 
-            cycle, 
-            100.0f * ((float)cycle / (float)max_cycles)
-        );
-
-        // 仅刷新脏页
-        screen.flushDirty();  
-
-        int64_t cycle_end = esp_timer_get_time();  // 单次刷新结束
-        cycle_duration = cycle_end - cycle_start;
-
-        // 打印每次刷新耗时
-        printf("Cycle %d complete. Took %lld ms. FPS: %.2f\n",
-               cycle, cycle_duration / 1000, 1000000.0 / (cycle_duration > 0 ? cycle_duration : 1));
-    }
-
-    int64_t total_end = esp_timer_get_time();  // 总结束时间
-    int64_t total_duration = total_end - total_start;
-    float avg_fps = (float)max_cycles * 1000000.0 / total_duration;
-
-    // 打印总耗时和平均帧率
-    printf("Total time: %lld ms. Average FPS: %.2f\n",
-           total_duration / 1000, avg_fps);
-
-    // 显示最终统计
-    screen.fillScreen(0xFFFF);
-    screen.moveCursor(38, 38);
-    screen.printf("Total time: %lld ms.\nAverage FPS: %.2f\n",
-        total_duration / 1000, avg_fps
-    );
-    screen.flush();  // 刷新屏幕
-}
-
-
 int main() {
     printf("| Entered main().\n");
     // 初始化屏幕信息。
     screen.begin();
     screen.changeCursorColor(0x07E0);
 
-    stressTestDirty();
+    stressTestAll();
     return 0;
 }
 

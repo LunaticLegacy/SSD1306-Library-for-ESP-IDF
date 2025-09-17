@@ -105,10 +105,21 @@ void ST7789::drawChar(
     
 }
 
+// -=-=-=-=-=-=-=-=-=-=-= 组件 =--=-=-=-=-=-=-=-=-=-=-
 // 开始写组件。
 ComponentBase::ComponentBase(ST7789* base)
     : target_driver(base) {
-        // 这里的构造函数……就算了吧。
+    // 这里的构造函数……就算了吧。
 } 
+
+ComponentBase::~ComponentBase() {
+
+}
+
+// =========== 告示牌 ============
+Sign::Sign(ST7789* base, SignInfo&& sign_info) 
+    : ComponentBase(base), sign_info(std::move(sign_info)) {
+
+}
 
 } // namespace Luna

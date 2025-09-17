@@ -1,6 +1,8 @@
 build
 components
+depend*
 managed_components
+sdk*
 
 .cache
 .dist

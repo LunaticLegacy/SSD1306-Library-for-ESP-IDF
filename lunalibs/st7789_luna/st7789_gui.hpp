@@ -1,9 +1,10 @@
 #ifndef __ST7789_GUI_HPP
 #define __ST7789_GUI_HPP
 
+#include <string>
+
 #include "./st7789_basic.hpp"
 #include "./font_luna.h"
-
 
 namespace Luna
 {
@@ -70,15 +71,49 @@ public:
     // 虚析构函数。
     virtual ~ComponentBase();
 
+    // 组件必须实现draw函数
     virtual void draw() = 0;
 
-    virtual ST7789* getDriver() const { return target_driver; }
+    // driver getter - 这个东西必须在构造期间设定，且在整个生命周期中不得改变。
+    ST7789* getDriver() const { return target_driver; }
+
+    // x y getter
+    uint16_t getx() const { return this->x; }
+    uint16_t gety() const { return this->y; }
+
+    // x y setter
+    void setx(const uint16_t x) { this->x = x; }
+    void sety(const uint16_t y) { this->y = y; }
 
 private:
     ST7789* target_driver;
 
+    // 组件自身可以没有这两条属性，但不得没有以下内容。
     uint16_t x, y;
-}
+};
+
+// 告示牌，需自行实现printf函数——调用ST7789的printf。
+typedef struct SignInfo {
+    // 告示牌使用的所有信息。
+    uint16_t x;
+    uint16_t y;
+    uint16_t color_inner;
+    uint16_t color_outline;
+    uint16_t color_text;
+    std::string text;
+} SignInfo;
+
+class Sign : ComponentBase {
+public:
+    Sign() = delete;
+
+    // 该组件必须规定坐标、宽度及颜色。且必须手动创建。
+    explicit Sign(ST7789* base, SignInfo&& sign_info);
+
+private:
+    SignInfo sign_info;
+
+};
 
 } // namespace Luna
 

@@ -20,6 +20,9 @@
 // 屏幕指令头文件 - 宏定义，单独封装为一个头文件。
 #include "./st7789_cmd_table.h"
 
+// 标注在函数上方表达“被弃用”的宏，无实际意义。
+#define DEPRECATED
+
 namespace Luna{
 
 // 配置内容结构体。
@@ -71,7 +74,7 @@ public:
     void flush();
 
     // 有脏页的flush。
-    void flushDirty();
+    DEPRECATED void flushDirty();
 
     // 析构函数，释放缓冲区
     virtual ~ST7789_Basic();
