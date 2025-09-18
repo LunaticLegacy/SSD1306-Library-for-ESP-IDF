@@ -11,6 +11,24 @@ namespace Luna
     
 // =-=-=-=-=-=-=-=-=-=-=-=-= 图形库开始 =-=-=-=-=-=-=-=-=-=-=-=-=
 
+// 使用一个uint16_t数组，作为当前屏幕鼠标指针位置。
+typedef struct cursor {
+    uint16_t x = 0;
+    uint16_t y = 0;
+    uint16_t begin_x = 0;
+    uint16_t begin_y = 0;
+    uint16_t color = 0xFFFF;
+} Cursor;
+
+// 用于表达文本框信息的类。
+typedef struct textarea {
+    uint16_t begin_x = 0;
+    uint16_t begin_y = 0;
+    uint16_t end_x = 0;
+    uint16_t end_y = 0;
+} TextArea;
+
+// ST7789的正式内容。
 class ST7789 : public ST7789_Basic {
 public:
     ST7789() = delete;
@@ -18,14 +36,22 @@ public:
 
     ST7789(const ST7789_Config& config);
 
-    void printf(const char* arg, ...);
+    // 一个对外提供的API，用于指定区域进行绘制。相当于printf。
+    void drawTextf(TextArea&& area, const char* fmt, ...);
 
-    // 移动鼠标指针，不重载。
+    // 重载drawTextf，有已经解包完成的va_list。
+    void drawTextf(TextArea&& area, const char* fmt, va_list args);
+
+    // 然后实现一份printf。
+    void printf(const char* fmt, ...);
+
+    // 移动鼠标指针，且移动起始xy标识符。
     void moveCursor(const uint16_t x, const uint16_t y) {
         this->cursor.x = x; this->cursor.y = y;
         this->cursor.begin_x = x; this->cursor.begin_y = y;
     }
 
+    // 更换指针颜色。
     void changeCursorColor(const uint16_t color) {
         this->cursor.color = color;
     }
@@ -36,29 +62,23 @@ public:
         uint16_t color_inner, uint16_t color_frame, uint16_t frame_width
     );
 
+    // 绘制字符串，相当于puts。
+    void drawString(TextArea area, const char* text);
+
+    // 绘制字符，相当于putc，目前暂不支持绘制非ASCII字符。
+    void drawChar(
+        uint16_t x, uint16_t y, char c, const FontDef* font, uint16_t color
+    );
+
 private:
     // 导入正在使用的字体。
     const FontDef* using_font = &Font_6x8;
 
-    // 保存一个uint16_t数组，作为当前屏幕鼠标指针位置。
-    typedef struct cursor {
-        uint16_t x = 0;
-        uint16_t y = 0;
-        uint16_t begin_x = 0;
-        uint16_t begin_y = 0;
-        uint16_t color = 0xFFFF;
-    } Cursor;
-    // 指针。
+    // 屏幕绘制文本的指针参数。
     Cursor cursor;
-
-    // 绘制字符串，目前暂不支持绘制非ASCII字符。
-    void drawChar(
-        uint16_t x, uint16_t y, char c, const FontDef* font, uint16_t color
-    );
 };
 
-// 组件，必须绑定到特定屏幕上。
-// 这是一个抽象类。
+// 组件，必须绑定到特定屏幕上。这是一个抽象类。
 class ComponentBase {
 public:
 
@@ -68,10 +88,13 @@ public:
     // 需要输入ST7789的内容。
     explicit ComponentBase(ST7789* base);
 
+    // 指定基准位置。
+    explicit ComponentBase(ST7789* base, uint16_t x, uint16_t y);
+
     // 虚析构函数。
     virtual ~ComponentBase();
 
-    // 组件必须实现draw函数
+    // 绘制组件 - 虚函数，组件必须自行实现。
     virtual void draw() = 0;
 
     // driver getter - 这个东西必须在构造期间设定，且在整个生命周期中不得改变。
@@ -85,7 +108,7 @@ public:
     void setx(const uint16_t x) { this->x = x; }
     void sety(const uint16_t y) { this->y = y; }
 
-private:
+protected:
     ST7789* target_driver;
 
     // 组件自身可以没有这两条属性，但不得没有以下内容。
@@ -97,18 +120,23 @@ typedef struct SignInfo {
     // 告示牌使用的所有信息。
     uint16_t x;
     uint16_t y;
+    uint16_t width;
+    uint16_t height;
+    uint16_t frame_width;
     uint16_t color_inner;
     uint16_t color_outline;
     uint16_t color_text;
     std::string text;
 } SignInfo;
 
-class Sign : ComponentBase {
+class Sign : public ComponentBase {
 public:
     Sign() = delete;
 
     // 该组件必须规定坐标、宽度及颜色。且必须手动创建。
-    explicit Sign(ST7789* base, SignInfo&& sign_info);
+    explicit Sign(ST7789* base, SignInfo sign_info);
+
+    void draw() override;
 
 private:
     SignInfo sign_info;

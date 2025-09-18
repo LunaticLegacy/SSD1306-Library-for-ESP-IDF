@@ -46,6 +46,32 @@ void stressTestAll() {
     const int max_cycles = 500;
     int64_t cycle_duration = 0.0;
 
+    Luna::SignInfo signConfig = {
+        .x = 100, 
+        .y = 80, 
+        .width = 40, 
+        .height = 100, 
+        .frame_width = 4, 
+        .color_inner = 0x0000, 
+        .color_outline = 0xFFFF, 
+        .color_text = 0xFFFF, 
+        .text = ""
+    };
+    Luna::Sign sign(&screen, signConfig);
+
+    Luna::SignInfo signConfig2 = {
+        .x = 50, 
+        .y = 50, 
+        .width = 40, 
+        .height = 20, 
+        .frame_width = 4, 
+        .color_inner = 0x0000, 
+        .color_outline = 0xFFFF, 
+        .color_text = 0xFFFF, 
+        .text = "Hello world!"
+    };
+    Luna::Sign sign2(&screen, signConfig2);
+
     int64_t total_start = esp_timer_get_time();  // 总开始时间
 
     for (int cycle = 0; cycle < max_cycles; cycle++) {
@@ -57,13 +83,15 @@ void stressTestAll() {
                 screen.drawRectangle(x, y, rectSize, rectSize, colors[colorIndex]);
             }
         }
-        screen.drawFrame(100, 80, 40, 100, 0xFFFF, 0x0000, 4);
-        screen.moveCursor(88, 108);
-        screen.printf("FPS: %.6f\nCycle: %d\nProc: %.4f%%", 
-            1000000.0 / cycle_duration, 
-            cycle, 
-            100.0f * ((float)cycle / (float)max_cycles)
-        );
+
+        // sign.draw();
+        sign2.draw();
+        // screen.moveCursor(88, 108);
+        // screen.printf("FPS: %.6f\nCycle: %d\nProc: %.4f%%", 
+        //     1000000.0 / cycle_duration, 
+        //     cycle, 
+        //     100.0f * ((float)cycle / (float)max_cycles)
+        // );
 
         screen.flush();  // 刷新屏幕
 

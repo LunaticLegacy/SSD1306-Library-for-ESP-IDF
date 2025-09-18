@@ -332,7 +332,7 @@ void ST7789_Basic::drawCircle(uint16_t x, uint16_t y, uint16_t r, uint16_t color
         uint8_t dx_begin = x0 / (this->_width / 8);
         uint8_t dx_end = x1 / (this->_width / 8);
         uint8_t dy_idx = py / (this->_height / 8);
-        if (dy_idx >= 0 && dy_idx < 8) {
+        if (dy_idx < 8) {
             for (uint8_t j = dx_begin; j <= dx_end; ++j) {
                 this->dirty_map[dy_idx] |= (1 << j);
             }
